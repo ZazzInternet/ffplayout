@@ -17,7 +17,8 @@ import '@vuepic/vue-datepicker/dist/main.css'
 // @ts-ignore
 import { Splitpanes, Pane } from 'splitpanes'
 
-import { computed, ref, onBeforeMount, onBeforeUnmount, watch } from 'vue'
+import { computed, ref, onBeforeMount, onBeforeUnmount, onMounted, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { cloneDeep } from 'es-toolkit/object'
 import { useI18n } from 'vue-i18n'
 import { useWindowSize } from '@vueuse/core'
@@ -156,6 +157,18 @@ function cancelSourceInspection() {
     inspectingSource.value = false
 }
 onBeforeUnmount(cancelSourceInspection)
+
+// Editing happens in the browser until the playlist is saved. Ask before a
+// navigation, a reload or a closed tab discards it.
+function warnBeforeUnload(event: BeforeUnloadEvent) {
+    if (playlistStore.hasUnsavedChanges) {
+        event.preventDefault()
+    }
+}
+
+onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', warnBeforeUnload))
+onBeforeRouteLeave(() => !playlistStore.hasUnsavedChanges || window.confirm(t('player.leaveUnsaved')))
 
 watch(
     () => [configStore.channels[configStore.i]?.id, showSourceModal.value],
@@ -398,7 +411,7 @@ async function importPlaylist(imp: boolean) {
 
         playlistStore.isLoading = true
         await authFetch<any>(
-            `/api/file/${configStore.channels[configStore.i]?.id}/import?file=${textFile.value[0].name}&date=${
+            `/api/file/${configStore.channels[configStore.i]?.id}/import?file=${encodeURIComponent(textFile.value[0].name)}&date=${
                 listDate.value
             }`,
             {
@@ -441,10 +454,14 @@ async function savePlaylist(save: boolean) {
         })
             .then((response: any) => {
                 indexStore.msgAlert('success', response, 2)
+
+                if (targetDate.value === listDate.value) {
+                    playlistStore.markSaved()
+                }
             })
             .catch((e: any) => {
                 if (e.status === 409) {
-                    indexStore.msgAlert('warning', e.data, 2)
+                    indexStore.msgAlert('warning', e.message, 2)
                 } else {
                     indexStore.msgAlert('error', e, 4)
                 }
@@ -459,10 +476,15 @@ async function deletePlaylist(del: boolean) {
         await authFetch(`/api/playlist/${configStore.channels[configStore.i]?.id}/${listDate.value}`, {
             method: 'DELETE',
             headers: { ...configStore.contentType, ...authStore.authHeader },
-        }).then(() => {
-            playlistStore.playlist = []
-            indexStore.msgAlert('warning', t('player.deleteSuccess'), 2)
         })
+            .then(() => {
+                playlistStore.playlist = []
+                playlistStore.markSaved()
+                indexStore.msgAlert('warning', t('player.deleteSuccess'), 2)
+            })
+            .catch((e) => {
+                indexStore.msgAlert('error', e instanceof Error ? e.message : String(e), 4)
+            })
     }
 }
 </script>
@@ -738,7 +760,7 @@ async function deletePlaylist(del: boolean) {
             <input type="file" class="file-input file-input-sm w-full" multiple @change="onFileChange" />
         </GenericModal>
 
-        <GenericModal :show="showDeleteModal" title="Delete Program" :modal-action="deletePlaylist">
+        <GenericModal :show="showDeleteModal" :title="t('player.deletePlaylist')" :modal-action="deletePlaylist">
             <span>
                 {{ t('player.deleteFrom') }} <strong>{{ listDate }}</strong>
             </span>

@@ -21,8 +21,10 @@ const indexStore = useIndex()
 const selected = ref(null as null | number)
 const users = ref([] as User[])
 const showUserModal = ref(false)
+const showDeleteModal = ref(false)
 const newPass = ref('')
 const confirmPass = ref('')
+const currentPass = ref('')
 
 const user = ref({
     id: 0,
@@ -68,7 +70,21 @@ async function getUserConfig() {
     })
 }
 
-async function deleteUser() {
+function askDeleteUser() {
+    if (configStore.configUser.id === configStore.currentUser) {
+        indexStore.msgAlert('error', t('user.deleteNotPossible'), 2)
+    } else {
+        showDeleteModal.value = true
+    }
+}
+
+async function deleteUser(confirmed: boolean) {
+    showDeleteModal.value = false
+
+    if (!confirmed) {
+        return
+    }
+
     if (configStore.configUser.id === configStore.currentUser) {
         indexStore.msgAlert('error', t('user.deleteNotPossible'), 2)
     } else {
@@ -95,7 +111,7 @@ function clearUser() {
     user.value.password = ''
     user.value.confirm = ''
     user.value.admin = false
-    user.value.channel_ids = [1]
+    user.value.channel_ids = [configStore.channels[configStore.i]?.id ?? 1]
     user.value.role_id = 3
     user.value.two_factor = true
 }
@@ -124,8 +140,8 @@ async function addUser(add: boolean) {
                     selected.value = createdUser.id
                     await getUserConfig()
                 }
-            } catch {
-                indexStore.msgAlert('error', t('user.addFailed'), 3)
+            } catch (e) {
+                indexStore.msgAlert('error', `${t('user.addFailed')} ${e instanceof Error ? e.message : ''}`, 4)
             }
 
             clearUser()
@@ -148,16 +164,27 @@ async function onSubmitUser() {
         }
     }
 
+    const ownPasswordChanged = Boolean(newPass.value) && configStore.configUser.id === configStore.currentUser
+
     await authStore.inspectToken()
     try {
-        await configStore.setUserConfig(configStore.configUser)
+        // The server asks for the current password before it changes the
+        // password or the mail address of the own account.
+        await configStore.setUserConfig({ ...configStore.configUser, current_password: currentPass.value })
         indexStore.msgAlert('success', t('user.updateSuccess'), 2)
-    } catch {
-        indexStore.msgAlert('error', t('user.updateFailed'), 2)
+
+        if (ownPasswordChanged) {
+            // The server ended all sessions of this account; log in again.
+            await configStore.logout()
+            return
+        }
+    } catch (e) {
+        indexStore.msgAlert('error', `${t('user.updateFailed')} ${e instanceof Error ? e.message : ''}`, 4)
     }
 
     newPass.value = ''
     confirmPass.value = ''
+    currentPass.value = ''
 }
 </script>
 <template>
@@ -167,10 +194,10 @@ async function onSubmitUser() {
             <select v-model="selected" class="join-item select w-full" @change="onChange($event)">
                 <option v-for="item in users" :key="item.username" :value="item.id">{{ item.username }}</option>
             </select>
-            <button class="join-item btn btn-primary" title="Add new User" @click="showUserModal = true">
+            <button class="join-item btn btn-primary" :title="t('user.add')" @click="showUserModal = true">
                 <i class="bi-plus-lg" />
             </button>
-            <button class="join-item btn btn-primary" title="Delete selected user" @click="deleteUser()">
+            <button class="join-item btn btn-primary" :title="t('user.delete')" @click="askDeleteUser()">
                 <i class="bi-x-lg" />
             </button>
         </div>
@@ -197,6 +224,17 @@ async function onSubmitUser() {
             <fieldset class="fieldset">
                 <legend class="fieldset-legend">{{ t('user.confirmPass') }}</legend>
                 <input v-model="confirmPass" type="password" name="password" class="input w-full" />
+            </fieldset>
+            <fieldset v-if="configStore.configUser.id === configStore.currentUser" class="fieldset">
+                <legend class="fieldset-legend">{{ t('user.currentPass') }}</legend>
+                <input
+                    v-model="currentPass"
+                    type="password"
+                    name="current-password"
+                    autocomplete="current-password"
+                    class="input w-full"
+                />
+                <p class="label whitespace-normal">{{ t('user.currentPassHelp') }}</p>
             </fieldset>
 
             <fieldset v-if="authStore.role === 'global_admin'" class="fieldset mt-2 rounded-box w-full">
@@ -226,7 +264,13 @@ async function onSubmitUser() {
         </form>
     </div>
 
-    <GenericModal :show="showUserModal" title="Add user" :modal-action="addUser">
+    <GenericModal
+        :show="showDeleteModal"
+        :title="t('user.delete')"
+        :text="`${t('media.deleteQuestion')}:\n${configStore.configUser?.username ?? ''}`"
+        :modal-action="deleteUser"
+    />
+    <GenericModal :show="showUserModal" :title="t('user.add')" :modal-action="addUser">
         <div class="w-full max-w-125 h-110">
             <fieldset class="fieldset">
                 <legend class="fieldset-legend">{{ t('user.name') }}</legend>

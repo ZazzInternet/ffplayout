@@ -6,6 +6,9 @@ on:
       - '**'
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -101,8 +104,12 @@ jobs:
         run: |
           npm ci
           npm run build
-          npm run test:graphics
-          npm run test:player
+          npm test
+          npm audit --audit-level=high
+
+      - name: Build and packaging script tests
+        if: runner.os == 'Linux'
+        run: python3 -m unittest discover -s scripts/tests
 
       - name: Rust tests and lint on Linux
         if: runner.os == 'Linux'
@@ -112,6 +119,8 @@ jobs:
           cargo test -p ff-engine --no-default-features -- --skip input::tests::live_reception_
           cargo test -p ff-engine --no-default-features --lib input::tests::live_reception_ -- --test-threads=1
           cargo clippy --no-default-features --all-targets -- --deny warnings
+          # The release builds use the default features, including the desktop output.
+          cargo clippy --all-targets -- --deny warnings
           cargo fmt --all -- --check
           cargo build --no-default-features --features embed_frontend
 

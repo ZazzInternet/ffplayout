@@ -144,6 +144,24 @@ pub async fn revoke_refresh_family(
     Ok(result.rows_affected() > 0)
 }
 
+/// Revoke every refresh token of a user, for example after a password change.
+pub async fn revoke_user_refresh_tokens(
+    pool: &SqlitePool,
+    user_id: i32,
+    now: i64,
+) -> Result<u64, ProcessError> {
+    let result = sqlx::query(
+        "UPDATE auth_refresh_tokens SET revoked_at = $1
+         WHERE user_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};

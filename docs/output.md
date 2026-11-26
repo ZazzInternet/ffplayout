@@ -57,7 +57,9 @@ has reached its DTS. An idle timeout of 20 ms also releases short tails and live
 input without requiring a fixed media lookahead.
 Frame-threaded file decoding is limited to at most four threads (fewer at low
 frame rates), so decoder-held frames cannot consume the entire read-ahead budget.
-Recording keeps its unpaced muxer. Shared encoding owns codecs without opening
+Recording keeps its unpaced muxer. A recording that is disabled by an error, such as
+a full disk or an unreachable mount, does not affect the outputs and is opened again
+once a minute; it resumes with a new file as soon as the directory is usable. Shared encoding owns codecs without opening
 an intermediate destination. Parallel output instances are described below.
 
 The program clock persists across clip boundaries and preserves the existing
@@ -331,15 +333,21 @@ Opening, transport or mux failures disable only the affected destination; other
 destinations keep using the profile. Encoder failure or raw queue overload affects
 the whole encoding group. Compressed queue overload disables that destination
 instead of resuming with a broken GOP. Destination failures retry 15 seconds after
-each failed attempt, for at most three minutes after the first failure. No new
-attempt starts at or after that deadline; blocking network I/O retains its ten-second
-timeout. A successful mux write resets the failure window, so a later outage gets
-a new three-minute window. After exhaustion the output stays failed. **Reconnect**
-starts a fresh round for that destination using its running configuration, without
+each failed attempt, for three minutes after the first failure; blocking network I/O
+retains its ten-second timeout. A successful mux write resets the failure window, so
+a later outage gets a new three-minute window. After that window the output is
+reported as failed, but an unattended channel still recovers on its own: attempts
+continue with a delay that doubles from 30 seconds up to five minutes, for as long as
+the channel runs. **Reconnect** starts a fresh fast round immediately for that
+destination using its running configuration, without
 restarting the channel or other outputs. Output settings use the live update path.
-Encoder failures require recreating the affected encoding group (for example by
-disabling its consumers and enabling them again) or restarting the channel; the button is
-only available for live destination workers. Even if every destination is offline,
+A failed encoding group (encoder error or raw queue overload) is started again
+automatically while the other groups keep playing: after 5 seconds, then with a
+delay that doubles up to five minutes; a group that ran for a minute starts over
+with the short delay. Saving its output settings replaces it immediately. If every
+group has failed, the channel supervisor restarts the playout. The button is
+only available for live destination workers. If the program clock delivers no video
+frame for 60 seconds, a watchdog restarts the playout of that channel. Even if every destination is offline,
 the program and encoders continue and discard outgoing packets. Reconnected
 outputs discard stale queued media and wait for a fresh keyframe for each rendition;
 audio older than that keyframe is omitted. Normal shutdown drains the encoders before closing all
