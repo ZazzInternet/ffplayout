@@ -1,10 +1,12 @@
 use std::{
+    net::IpAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use argon2::{Argon2, PasswordHasher};
 use log::warn;
+use rand::{RngExt, distr::Alphanumeric};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use tokio::{
@@ -16,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     db::{
         handles,
-        models::{InitialSetup, SetupSettings},
+        models::{InitialSetup, SetupSettings, validate_new_password},
     },
     file::init_storage,
     player::controller::ChannelController,
@@ -31,6 +33,50 @@ use crate::{
 
 static SETUP_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// One-time secret for completing the setup from another host.
+///
+/// Until setup is completed there are no users, so the setup route cannot be
+/// authenticated. The token is printed on the server console; only someone
+/// with access to the host can read it.
+static SETUP_TOKEN: LazyLock<String> = LazyLock::new(|| {
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect()
+});
+
+pub fn setup_token() -> &'static str {
+    &SETUP_TOKEN
+}
+
+/// Clients on the host itself do not need the setup token.
+pub fn setup_token_required(client: IpAddr) -> bool {
+    !client.is_loopback()
+}
+
+pub fn ensure_setup_token(client: IpAddr, token: Option<&str>) -> Result<(), ServiceError> {
+    if !setup_token_required(client) {
+        return Ok(());
+    }
+
+    let expected = setup_token().as_bytes();
+    let provided = token.unwrap_or_default().trim().as_bytes();
+    // Compare all bytes, so timing does not reveal the matching prefix.
+    let differences = expected
+        .iter()
+        .zip(provided)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+
+    if expected.len() != provided.len() || differences != 0 {
+        return Err(ServiceError::Forbidden(
+            "Invalid setup token; it is printed in the ffplayout console output".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetupRequest {
     #[serde(flatten)]
@@ -39,6 +85,8 @@ pub struct SetupRequest {
     pub mail: String,
     pub password: String,
     pub two_factor: bool,
+    #[serde(default)]
+    pub setup_token: Option<String>,
 }
 
 fn validate_setup_paths(settings: &SetupSettings) -> Result<(), ServiceError> {
@@ -68,6 +116,7 @@ pub async fn complete_setup(
         ));
     }
 
+    validate_new_password(&data.password).map_err(ServiceError::BadRequest)?;
     validate_setup_paths(&data.settings)?;
 
     let _setup_guard = SETUP_LOCK.lock().await;
@@ -200,6 +249,7 @@ mod tests {
             mail: "setup@example.org".to_string(),
             password: "setup-password".to_string(),
             two_factor: false,
+            setup_token: None,
         }
     }
 
@@ -402,5 +452,22 @@ mod tests {
     fn setup_paths_reject_windows_roots_and_relative_components() {
         assert!(validate_setup_path("Logging", r"C:\").is_err());
         assert!(validate_setup_path("Logging", r"C:\logs\..\system").is_err());
+    }
+
+    #[test]
+    fn setup_token_is_required_only_for_other_hosts() {
+        let local = IpAddr::from([127, 0, 0, 1]);
+        let remote = IpAddr::from([203, 0, 113, 9]);
+        let wrong = "x".repeat(setup_token().len());
+
+        assert!(ensure_setup_token(local, None).is_ok());
+        assert!(ensure_setup_token(remote, Some(setup_token())).is_ok());
+
+        for token in [None, Some(""), Some("short"), Some(wrong.as_str())] {
+            assert!(matches!(
+                ensure_setup_token(remote, token),
+                Err(ServiceError::Forbidden(_))
+            ));
+        }
     }
 }

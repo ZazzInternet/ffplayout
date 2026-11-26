@@ -10,6 +10,32 @@ ffplayout provides ***.deb** and ***.rpm** packages, which makes it easier to in
 4. Start the service, open **http://[IP ADDRESS]:8787**, and complete the first-time setup in the browser. It creates the global settings and first global admin.
 5. Use a reverse proxy for SSL before exposing ffplayout to the Internet.
 
+When the setup page is opened from another host, it asks for a one-time setup
+token. Until setup is completed there are no users, so the token proves access to
+the server. It is printed in the console output at startup:
+
+```bash
+journalctl -u ffplayout | grep 'Setup token'
+```
+
+A browser on the server itself (`http://127.0.0.1:8787`) does not need the token.
+
+#### Reverse proxies and client addresses
+
+Login rate limiting, file-access tokens and event-stream tickets are bound to the
+client address. Forwarding headers (`X-Forwarded-For`, `X-Real-IP`) are only
+trusted when the connection comes from a reverse proxy: loopback addresses are
+always trusted, which covers nginx on the same host. For a proxy on another host
+or container network, pass its address or network:
+
+```bash
+ffplayout -l 0.0.0.0:8787 --trusted-proxy 172.18.0.0/16
+```
+
+Several values can be separated by commas, or set with the `TRUSTED_PROXY`
+environment variable. Requests from any other peer use the socket address and
+cannot override it with headers.
+
 The package installation creates a service user named **ffpu**. The configured
 log, playlist, public, and storage directories must be writable by that user.
 
