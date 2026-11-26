@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, PoisonError, Weak},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -69,6 +69,7 @@ struct OutputRegistry {
     next_generation: u64,
     dynamic: bool,
     update: Option<Vec<OutputDestination>>,
+    program_frame: Option<Instant>,
 }
 
 impl OutputStatus {
@@ -77,6 +78,27 @@ impl OutputStatus {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .dynamic
+    }
+
+    /// Time since the program clock last delivered a video frame to the
+    /// outputs, or `None` before the first frame of this playout.
+    ///
+    /// The frame rate of a running channel never drops to zero: gaps are
+    /// filled with black. A growing age therefore means the playout stalled.
+    pub fn program_frame_age(&self) -> Option<Duration> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .program_frame
+            .map(|frame| frame.elapsed())
+    }
+
+    /// Record that the program clock delivered a video frame just now.
+    pub fn mark_program_frame(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .program_frame = Some(Instant::now());
     }
 
     /// Replace the pending update; media threads consume only the latest snapshot.
@@ -387,7 +409,55 @@ pub(super) enum Message {
     AdvanceSubtitles(i64),
 }
 
+const GROUP_RESTART_INTERVAL: Duration = Duration::from_secs(5);
+const GROUP_RESTART_MAX_INTERVAL: Duration = Duration::from_secs(300);
+const GROUP_STABLE_AFTER: Duration = Duration::from_secs(60);
+
+/// Restart schedule of a failed encoding group.
+///
+/// An encoder error or an overloaded raw queue stops one group while the
+/// other groups keep playing. Nobody may be watching a 24/7 channel, so the
+/// group is started again after a delay that doubles with every failure.
+/// A group that ran for `stable_after` starts over with the first delay.
+#[derive(Clone, Copy, Debug)]
+struct GroupRestart {
+    interval: Duration,
+    max_interval: Duration,
+    stable_after: Duration,
+}
+
+impl Default for GroupRestart {
+    fn default() -> Self {
+        Self {
+            interval: GROUP_RESTART_INTERVAL,
+            max_interval: GROUP_RESTART_MAX_INTERVAL,
+            stable_after: GROUP_STABLE_AFTER,
+        }
+    }
+}
+
+impl GroupRestart {
+    fn delay(&self, failures: u32) -> Duration {
+        let factor = 1_u32
+            .checked_shl(failures.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+
+        self.interval.saturating_mul(factor).min(self.max_interval)
+    }
+}
+
+/// Failures of one group, kept across the workers that replace each other.
+#[derive(Clone, Copy, Debug, Default)]
+struct GroupFailures {
+    count: u32,
+    /// Set while the group is down and waiting for its next start.
+    restart_at: Option<Instant>,
+}
+
 struct DestinationWorker {
+    /// Configuration to start this group again after a failure.
+    destinations: Vec<OutputDestination>,
+    started: Instant,
     encoding_revision: String,
     gop: u32,
     subtitles: bool,
@@ -424,6 +494,7 @@ impl DestinationWorker {
             destination.config.loudness_meter_control = crate::LoudnessMeterControl::default();
             destination.config.output_status = program.output_status.clone();
         }
+        let restartable = destinations.clone();
         let subtitles = destinations.iter().any(OutputDestination::writes_subtitles);
         let encoding_revision = destinations[0].config.encoding_revision.clone();
         let gop = super::shared::gop_size(&destinations)?;
@@ -496,6 +567,8 @@ impl DestinationWorker {
             })?;
 
         Ok(Self {
+            destinations: restartable,
+            started: Instant::now(),
             encoding_revision,
             gop,
             subtitles,
@@ -588,6 +661,8 @@ pub(crate) struct ParallelOutput {
     config: OutputConfig,
     context: Mutex<OutputContext>,
     retired: Mutex<Vec<JoinHandle<()>>>,
+    restart: GroupRestart,
+    failures: Mutex<BTreeMap<i32, GroupFailures>>,
     clock: SharedPlayoutClock,
     video_time_base: ffmpeg_next::Rational,
     audio_time_base: ffmpeg_next::Rational,
@@ -625,6 +700,8 @@ impl ParallelOutput {
             config: program,
             context: Mutex::new(OutputContext::default()),
             retired: Mutex::new(Vec::new()),
+            restart: GroupRestart::default(),
+            failures: Mutex::new(BTreeMap::new()),
             clock: Arc::new(Mutex::new(PlayoutClock::new())),
             video_time_base: config.video_time_base,
             audio_time_base: config.audio_time_base,
@@ -645,8 +722,15 @@ impl ParallelOutput {
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|worker| !worker.is_finished());
         let Some(destinations) = self.config.output_status.take_update() else {
+            self.restart_failed_groups(workers);
+
             return Ok(());
         };
+        // A new configuration replaces failed groups right away.
+        self.failures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.compositor
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -671,6 +755,7 @@ impl ParallelOutput {
                 let mut worker = previous.remove(index);
                 worker.ids = group.iter().map(|destination| destination.id).collect();
                 worker.subtitles = group.iter().any(OutputDestination::writes_subtitles);
+                worker.destinations.clone_from(&group);
                 worker.send(Message::Destinations(group), 0, None);
                 workers.push(worker);
             } else {
@@ -682,7 +767,7 @@ impl ParallelOutput {
                 workers.push(worker);
             }
         }
-        for mut worker in previous {
+        for worker in previous {
             for id in &worker.ids {
                 if !ids.contains(id) {
                     self.config
@@ -691,16 +776,93 @@ impl ParallelOutput {
                         .set(*id, "stopped", None);
                 }
             }
-            worker.control.cancel();
-            worker.queue.close();
-            // I/O shutdown must never stall the common program clock.
-            let reaper = thread::spawn(move || worker.finish());
-            let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
-            retired.retain(|worker| !worker.is_finished());
-            retired.push(reaper);
+            self.retire(worker);
         }
 
         Ok(())
+    }
+
+    fn retire(&self, mut worker: DestinationWorker) {
+        worker.control.cancel();
+        worker.queue.close();
+
+        // I/O shutdown must never stall the common program clock.
+        let reaper = thread::spawn(move || worker.finish());
+        let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+
+        retired.retain(|worker| !worker.is_finished());
+        retired.push(reaper);
+    }
+
+    /// Start failed encoding groups again once their delay has passed.
+    ///
+    /// When every group has failed, dispatching reports an error instead and
+    /// the channel supervisor restarts the whole playout.
+    fn restart_failed_groups(&self, workers: &mut [DestinationWorker]) {
+        if !workers.iter().any(|worker| worker.control.cancelled()) {
+            return;
+        }
+
+        let now = Instant::now();
+        let mut failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
+
+        for worker in workers.iter_mut() {
+            if !worker.control.cancelled() {
+                continue;
+            }
+
+            if worker.destinations.is_empty() {
+                continue;
+            }
+
+            let id = worker.id;
+            let channel = worker.channel;
+            let entry = failures.entry(id).or_default();
+            let Some(restart_at) = entry.restart_at else {
+                // First observation of this failure.
+                if now.saturating_duration_since(worker.started) >= self.restart.stable_after {
+                    entry.count = 0;
+                }
+
+                entry.count = entry.count.saturating_add(1);
+                entry.restart_at = Some(now + self.restart.delay(entry.count));
+                log::warn!(
+                    channel = channel;
+                    "Output {id} encoding group failed; restarting in {} seconds",
+                    self.restart.delay(entry.count).as_secs()
+                );
+
+                continue;
+            };
+
+            if now < restart_at {
+                continue;
+            }
+
+            match DestinationWorker::start_group(worker.destinations.clone(), &self.config) {
+                Ok(replacement) => {
+                    self.context
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .restore(&replacement);
+
+                    let failed = std::mem::replace(worker, replacement);
+
+                    self.retire(failed);
+                    entry.restart_at = None;
+                    log::info!(channel = channel; "Output {id} encoding group restarted");
+                }
+                Err(error) => {
+                    entry.count = entry.count.saturating_add(1);
+                    entry.restart_at = Some(now + self.restart.delay(entry.count));
+                    log::warn!(
+                        channel = channel;
+                        "Output {id} encoding group restart failed: {error:#}; next attempt in {} seconds",
+                        self.restart.delay(entry.count).as_secs()
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) fn clock(&self) -> SharedPlayoutClock {
@@ -849,6 +1011,8 @@ impl ParallelOutput {
         workers: &[DestinationWorker],
         prepared: Arc<ProgramVideo>,
     ) -> Result<()> {
+        self.config.output_status.mark_program_frame();
+
         let frame = &prepared.source;
         let bytes = (0..frame.planes())
             .map(|plane| frame.data(plane).len())
@@ -1115,6 +1279,8 @@ mod tests {
         for (id, resolution) in [(1, (320, 180)), (2, hls.composition_resolution())] {
             let control = Arc::new(PipelineControl::default());
             output.workers.lock().unwrap().push(DestinationWorker {
+                destinations: Vec::new(),
+                started: Instant::now(),
                 encoding_revision: String::new(),
                 gop: 50,
                 subtitles: false,
@@ -1197,6 +1363,8 @@ mod tests {
         for (id, subtitles) in [(1, false), (2, true)] {
             let control = Arc::new(PipelineControl::default());
             output.workers.lock().unwrap().push(DestinationWorker {
+                destinations: Vec::new(),
+                started: Instant::now(),
                 encoding_revision: String::new(),
                 gop: 50,
                 subtitles,
@@ -1503,6 +1671,128 @@ mod tests {
             );
         }
 
+        output.finish().unwrap();
+    }
+
+    #[test]
+    fn program_frame_age_is_armed_by_the_first_dispatched_frame() {
+        ffmpeg_next::init().unwrap();
+
+        let config = OutputConfig::new(160, 90, 25, 48_000);
+        let output = ParallelOutput::start(&config, false).unwrap();
+        let mut video = frame::Video::new(Pixel::YUV420P, 160, 90);
+
+        for plane in 0..video.planes() {
+            video.data_mut(plane).fill(128);
+        }
+
+        assert!(config.output_status.program_frame_age().is_none());
+
+        video.set_pts(Some(0));
+        output.encode_video(&video).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+
+        let age = config.output_status.program_frame_age().unwrap();
+
+        assert!(age >= Duration::from_millis(20) && age < Duration::from_secs(5));
+
+        config.output_status.clear();
+
+        assert!(config.output_status.program_frame_age().is_none());
+        output.finish().unwrap();
+    }
+
+    #[test]
+    fn group_restart_delay_doubles_up_to_the_maximum() {
+        let restart = GroupRestart::default();
+        let seconds = (1..=9)
+            .map(|failures| restart.delay(failures).as_secs())
+            .collect::<Vec<_>>();
+
+        assert_eq!(seconds, [5, 10, 20, 40, 80, 160, 300, 300, 300]);
+        assert_eq!(restart.delay(u32::MAX), GROUP_RESTART_MAX_INTERVAL);
+    }
+
+    #[test]
+    fn a_failed_encoding_group_restarts_while_another_group_keeps_running() {
+        ffmpeg_next::init().unwrap();
+
+        let mut config = OutputConfig::new(160, 90, 25, 48_000);
+
+        config.stream_type = crate::StreamType::Custom;
+        config.stream_format = "null".into();
+        config
+            .video_options
+            .insert("preset".into(), "ultrafast".into());
+
+        for id in [1, 2] {
+            config.destinations.push(OutputDestination {
+                id,
+                config: config.clone(),
+                target: OutputTarget::Stream {
+                    url: if cfg!(windows) { "NUL" } else { "/dev/null" }.into(),
+                },
+            });
+            config.destinations[id as usize - 1]
+                .config
+                .destinations
+                .clear();
+        }
+
+        let mut output = ParallelOutput::start(&config, false).unwrap();
+
+        output.restart = GroupRestart {
+            interval: Duration::from_millis(40),
+            max_interval: Duration::from_millis(80),
+            stable_after: Duration::from_secs(60),
+        };
+
+        let mut video = frame::Video::new(Pixel::YUV420P, 160, 90);
+
+        for plane in 0..video.planes() {
+            video.data_mut(plane).fill(128);
+        }
+
+        let encode = |video: &mut frame::Video, pts: i64| {
+            video.set_pts(Some(pts));
+            output.encode_video(video).unwrap();
+        };
+
+        encode(&mut video, 0);
+
+        let healthy = output.workers.lock().unwrap()[1].control.clone();
+
+        assert_eq!(output.workers.lock().unwrap().len(), 2);
+
+        // Two failures in a row: the second restart waits longer.
+        let mut pts = 1;
+
+        for delay in [40, 80] {
+            let failed = output.workers.lock().unwrap()[0].control.clone();
+
+            failed.fail("encoder error");
+            encode(&mut video, pts);
+            pts += 1;
+
+            // The failure was observed; the group is still down.
+            assert!(output.workers.lock().unwrap()[0].control.cancelled());
+
+            let failed_at = Instant::now();
+            let deadline = failed_at + Duration::from_secs(3);
+
+            while output.workers.lock().unwrap()[0].control.cancelled() {
+                assert!(Instant::now() < deadline, "group was not restarted");
+                std::thread::sleep(Duration::from_millis(5));
+                encode(&mut video, pts);
+                pts += 1;
+            }
+
+            assert!(failed_at.elapsed() >= Duration::from_millis(delay));
+            assert_eq!(output.workers.lock().unwrap()[0].id, 1);
+        }
+
+        assert!(!healthy.cancelled());
+        assert_eq!(output.workers.lock().unwrap().len(), 2);
         output.finish().unwrap();
     }
 
@@ -2368,6 +2658,8 @@ mod tests {
             let output = ParallelOutput::start(&config, false).unwrap();
             let control = Arc::new(PipelineControl::default());
             let worker = DestinationWorker {
+                destinations: Vec::new(),
+                started: Instant::now(),
                 encoding_revision: String::new(),
                 gop: 50,
                 subtitles: true,
@@ -2459,6 +2751,8 @@ mod tests {
     fn ingest_timestamp_gap_does_not_disable_a_nearly_empty_encoding_queue() {
         let control = Arc::new(PipelineControl::default());
         let worker = DestinationWorker {
+            destinations: Vec::new(),
+            started: Instant::now(),
             encoding_revision: String::new(),
             gop: 50,
             subtitles: false,
@@ -2491,6 +2785,8 @@ mod tests {
         let make_worker = |id| {
             let control = Arc::new(PipelineControl::default());
             DestinationWorker {
+                destinations: Vec::new(),
+                started: Instant::now(),
                 encoding_revision: String::new(),
                 gop: 50,
                 subtitles: false,
@@ -2533,6 +2829,8 @@ mod tests {
         for (id, subtitles) in [(1, true), (2, false)] {
             let control = Arc::new(PipelineControl::default());
             let worker = DestinationWorker {
+                destinations: Vec::new(),
+                started: Instant::now(),
                 encoding_revision: String::new(),
                 gop: 50,
                 subtitles,
@@ -2592,6 +2890,8 @@ mod tests {
             control.clone(),
         );
         let blocked = DestinationWorker {
+            destinations: Vec::new(),
+            started: Instant::now(),
             encoding_revision: String::new(),
             gop: 50,
             subtitles: false,
@@ -2618,6 +2918,8 @@ mod tests {
         );
         let healthy_control = Arc::new(PipelineControl::default());
         let healthy = DestinationWorker {
+            destinations: Vec::new(),
+            started: Instant::now(),
             encoding_revision: String::new(),
             gop: 50,
             subtitles: false,

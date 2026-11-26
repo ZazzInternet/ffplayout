@@ -339,9 +339,13 @@ continue with a delay that doubles from 30 seconds up to five minutes, for as lo
 the channel runs. **Reconnect** starts a fresh fast round immediately for that
 destination using its running configuration, without
 restarting the channel or other outputs. Output settings use the live update path.
-Encoder failures require recreating the affected encoding group (for example by
-disabling its consumers and enabling them again) or restarting the channel; the button is
-only available for live destination workers. Even if every destination is offline,
+A failed encoding group (encoder error or raw queue overload) is started again
+automatically while the other groups keep playing: after 5 seconds, then with a
+delay that doubles up to five minutes; a group that ran for a minute starts over
+with the short delay. Saving its output settings replaces it immediately. If every
+group has failed, the channel supervisor restarts the playout. The button is
+only available for live destination workers. If the program clock delivers no video
+frame for 60 seconds, a watchdog restarts the playout of that channel. Even if every destination is offline,
 the program and encoders continue and discard outgoing packets. Reconnected
 outputs discard stale queued media and wait for a fresh keyframe for each rendition;
 audio older than that keyframe is omitted. Normal shutdown drains the encoders before closing all
