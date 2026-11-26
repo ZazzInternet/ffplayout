@@ -12,6 +12,7 @@ import { storeToRefs } from 'pinia'
 import { useEventSource, useElementSize } from '@vueuse/core'
 
 import { authFetch } from '@/composables/authFetch'
+import { resolvePreviewUrl } from '@/composables/previewUrl'
 import { stringFormatter } from '@/composables/helper'
 import { useLivePlaylistSchedule } from '@/composables/useLivePlaylistSchedule'
 import { playoutDisplay } from '@/composables/livePlaylistSchedule'
@@ -34,6 +35,7 @@ dayjs.extend(utc)
 import VideoPlayer from '@/components/utils/VideoPlayer.vue'
 import MoqPlayer from '@/components/utils/MoqPlayer.vue'
 
+const pageLocation = window.location
 const { t } = useI18n()
 const authStore = useAuth()
 const configStore = useConfig()
@@ -464,7 +466,9 @@ function runControl(button: PlayerControlButton) {
                             :key="configStore.i"
                             class="live-player"
                             live
-                            :src="configStore.channels[configStore.i]?.preview_url ?? ''"
+                            :src="
+                                resolvePreviewUrl(configStore.channels[configStore.i]?.preview_url ?? '', pageLocation)
+                            "
                             type="application/x-mpegURL"
                         />
                     </div>
