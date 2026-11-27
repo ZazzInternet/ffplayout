@@ -23,6 +23,7 @@ pub(super) const TABLES: &[&str] = &[
     "config_recording",
     "config_graphics_state",
     "config_graphics",
+    "config_web_pages",
 ];
 
 pub(super) fn omitted(table: &str, column: &str) -> bool {

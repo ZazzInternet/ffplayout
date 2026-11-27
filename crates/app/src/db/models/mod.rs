@@ -7,6 +7,7 @@ use serde_json::Value;
 use sqlx::{FromRow, Pool, Row, Sqlite, sqlite::SqliteRow, types::Json};
 
 mod config_dump;
+mod web_page;
 
 use crate::{
     db::handles,
@@ -19,6 +20,9 @@ use crate::{
 };
 
 pub use config_dump::{ConfigDump, SettingsRow};
+pub use web_page::{
+    WEB_SOURCE_SCHEME, WebPage, WebStep, WebStepAction, is_web_source, web_page_id,
+};
 
 /// Desired manual graphics state; playback clocks and prepared pixels stay in the engine.
 #[derive(Clone, Debug, Serialize, Deserialize, FromRow)]

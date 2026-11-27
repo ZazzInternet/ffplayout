@@ -33,6 +33,7 @@ pub mod json_serializer;
 pub mod json_validate;
 
 use crate::{
+    db::models::is_web_source,
     player::controller::{
         ChannelManager,
         ProcessUnit::{self, *},
@@ -59,8 +60,10 @@ pub const DEFAULT_IMAGE_DURATION: f64 = 10.0;
 /// ends unexpectedly; operators can always choose a longer explicit `out`.
 pub const DEFAULT_LIVE_SOURCE_DURATION: f64 = 60.0;
 
+/// Live transports and web pages have no media timeline: they are neither
+/// probed nor seeked, and they play for exactly their playlist slot.
 pub(crate) fn is_live_source(source: &str) -> bool {
-    ff_engine::is_live_input(source)
+    ff_engine::is_live_input(source) || is_web_source(source)
 }
 
 /// Live transports have no stable source timeline. Playlist `in` is therefore
@@ -703,7 +706,7 @@ pub fn get_delta(config: &PlayoutConfig, begin: &f64) -> (f64, f64) {
 
 pub fn is_remote(path: &str) -> bool {
     static REMOTE_SOURCE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)^(https?|rtmps?|rts?p|udp|tcp|srt|rist)://.*")
+        Regex::new(r"(?i)^(https?|rtmps?|rts?p|udp|tcp|srt|rist|web)://.*")
             .expect("remote source pattern must be valid")
     });
 
@@ -977,9 +980,30 @@ mod tests {
         assert_eq!(media.duration, 120.0);
     }
 
+    #[tokio::test]
+    async fn web_pages_are_scheduled_like_live_sources() {
+        let media = Media::new(0, "web://3", true).await;
+
+        assert_eq!(media.out, DEFAULT_LIVE_SOURCE_DURATION);
+        assert!(media.probe.is_none());
+
+        let mut media = Media {
+            source: "web://3".to_string(),
+            seek: 5.0,
+            out: 90.0,
+            ..Media::default()
+        };
+
+        normalize_live_source_timing(&mut media);
+
+        assert_eq!(media.seek, 0.0);
+        assert_eq!(media.duration, 90.0);
+    }
+
     #[test]
     fn rist_sources_are_treated_as_remote_urls() {
         assert!(is_remote("rist://example.invalid:8193"));
+        assert!(is_remote("web://3"));
     }
 
     #[tokio::test]

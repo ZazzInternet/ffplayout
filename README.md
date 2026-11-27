@@ -27,6 +27,7 @@ Check the [releases](https://github.com/ffplayout/ffplayout/releases/latest) for
 - overlay text, controllable through [web frontend](/frontend/)
 - loop playlist infinitely
 - [remote source](/docs/remote_source.md)
+- [web pages](/docs/web_pages.md) as playlist sources, with automated login and navigation
 - trim last clip, to get full 24 hours
 - when playlist is not 24 hours long, loop fillers until time is full
 - set a custom day start, for example from 06:00 to 06:00 instead of midnight to midnight

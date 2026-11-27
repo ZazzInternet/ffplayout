@@ -45,6 +45,7 @@ import { authFetch } from '@/composables/authFetch'
 import { browseChannelPaths } from '@/composables/fileBrowser'
 import { stringFormatter, playlistOperations } from '@/composables/helper'
 import { createFilePreviewUrl, storagePreviewPath } from '@/composables/fileAccess'
+import { isWebSource, webPlaylistItem } from '@/composables/webPages'
 import { useAuth } from '@/stores/auth'
 import { useIndex } from '@/stores/index'
 import { useConfig } from '@/stores/config'
@@ -77,6 +78,11 @@ const showImportModal = ref(false)
 const showCopyModal = ref(false)
 const showDeleteModal = ref(false)
 const showPlaylistGenerator = ref(false)
+const showWebModal = ref(false)
+
+const webPages = ref<WebPage[]>([])
+const webPageId = ref(0)
+const webDuration = ref(60)
 
 const previewName = ref('')
 const previewUrl = ref('')
@@ -247,7 +253,39 @@ function previewBrowserFile(name: string) {
     )
 }
 
+async function openWebModal() {
+    try {
+        webPages.value = await authFetch<WebPage[]>(`/api/web/${configStore.channels[configStore.i]?.id}`)
+    } catch (error) {
+        indexStore.msgAlert('error', error instanceof Error ? error.message : String(error), 4)
+        return
+    }
+
+    if (!webPages.value.some((page) => page.id === webPageId.value)) {
+        webPageId.value = webPages.value[0]?.id ?? 0
+    }
+
+    showWebModal.value = true
+}
+
+function addWebPage(add: boolean) {
+    showWebModal.value = false
+
+    const page = webPages.value.find((item) => item.id === webPageId.value)
+
+    if (!add || !page || webDuration.value <= 0) return
+
+    playlistStore.playlist.push(webPlaylistItem(page, webDuration.value, genUID()))
+    processPlaylist(listDate.value, playlistStore.playlist, false)
+}
+
 async function setPreviewData(path: string) {
+    // A web page only exists as a picture while its browser runs on air.
+    if (isWebSource(path)) {
+        indexStore.msgAlert('warning', t('web.noPreview'), 3)
+        return
+    }
+
     const fullPath = storagePreviewPath(path, configStore.channels[configStore.i]?.storage ?? '')
 
     previewName.value = fullPath.split('/').slice(-1)[0] ?? ''
@@ -562,6 +600,9 @@ async function deletePlaylist(del: boolean) {
             >
                 <i class="bi-file-earmark-plus" />
             </button>
+            <button class="btn btn-sm btn-primary join-item" :title="t('web.addToPlaylist')" @click="openWebModal">
+                <i class="bi-globe" />
+            </button>
             <button
                 class="btn btn-sm btn-primary join-item"
                 :title="t('player.import')"
@@ -755,6 +796,29 @@ async function deletePlaylist(del: boolean) {
             @select="selectSourcePath"
             @close="sourceBrowserField = undefined"
         />
+
+        <GenericModal
+            :show="showWebModal"
+            :title="t('web.addToPlaylist')"
+            :modal-action="addWebPage"
+            :confirm-disabled="!webPageId || webDuration <= 0"
+        >
+            <div class="w-full md:w-96">
+                <p v-if="webPages.length === 0" class="text-sm text-base-content/70">{{ t('web.noPages') }}</p>
+                <template v-else>
+                    <fieldset class="fieldset">
+                        <legend class="fieldset-legend">{{ t('web.page') }}</legend>
+                        <select v-model.number="webPageId" class="select select-sm w-full">
+                            <option v-for="page in webPages" :key="page.id" :value="page.id">{{ page.name }}</option>
+                        </select>
+                    </fieldset>
+                    <fieldset class="fieldset">
+                        <legend class="fieldset-legend">{{ t('player.duration') }}</legend>
+                        <TimePicker v-model="webDuration" />
+                    </fieldset>
+                </template>
+            </div>
+        </GenericModal>
 
         <GenericModal :show="showImportModal" :title="t('player.import')" :modal-action="importPlaylist">
             <input type="file" class="file-input file-input-sm w-full" multiple @change="onFileChange" />

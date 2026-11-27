@@ -41,6 +41,7 @@ async fn populated() -> SqlitePool {
          INSERT INTO auth_user_channels(id,user_id,channel_id) VALUES(81,67,1);
          INSERT INTO config_graphics_state(channel_id,revision) VALUES(1,12);
          INSERT INTO config_graphics(channel_id,layer_id,name,settings,running,visible) VALUES(1,42,'Lower third','{\"source\":\"lower-third.png\"}',1,0);
+         INSERT INTO config_web_pages(id,channel_id,name,url,steps,audio,zoom,preroll) VALUES(55,1,'Dashboard','https://example.org/board','[{\"action\":\"click\",\"selector\":\"#login\"}]',0,1.5,30);
          INSERT INTO config_output_audio(id,output_id,position,title) SELECT 92,id,0,'Custom audio' FROM config_output WHERE name='hls' LIMIT 1;
          INSERT INTO auth_refresh_tokens(jti,family_id,user_id,expires_at,created_at) VALUES('omitted-session','omitted-family',67,9999999999,1);"
     ).execute(&pool).await.unwrap();
@@ -71,6 +72,7 @@ async fn restores_every_persistent_table_with_sparse_ids_and_relationships() {
          UPDATE channels SET id=id+1000;
          UPDATE config_graphics SET channel_id=channel_id+1000;
          UPDATE config_graphics_state SET channel_id=channel_id+1000;
+         UPDATE config_web_pages SET channel_id=channel_id+1000;
          UPDATE config SET id=id+1000;
          UPDATE auth_user SET id=id+1000;
          UPDATE config_text_presets SET id=id+1000;
@@ -277,6 +279,7 @@ async fn rejects_invalid_structured_settings_and_encoding_cycles() {
         ("config_output", "muxer_options", "invalid JSON"),
         ("config_output_audio", "encoder_options", "[]"),
         ("config_graphics", "settings", "[]"),
+        ("config_web_pages", "steps", r#"[{"action":"unknown"}]"#),
         ("config_output_audio", "channel_map", "null"),
     ] {
         let target = pool().await;

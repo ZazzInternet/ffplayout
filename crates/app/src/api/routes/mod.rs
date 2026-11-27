@@ -39,6 +39,7 @@ mod public;
 mod setup;
 mod system;
 mod user;
+mod web;
 
 pub use channel::*;
 pub use control::*;
@@ -54,6 +55,7 @@ pub use public::*;
 pub use setup::*;
 pub use system::*;
 pub use user::*;
+pub use web::*;
 
 use crate::{
     db::models::Role,

@@ -199,6 +199,35 @@ declare global {
         overtime?: boolean
     }
 
+    type WebStepAction = 'wait' | 'wait_for' | 'click' | 'type' | 'press' | 'goto' | 'script' | 'fullscreen'
+
+    interface WebStep {
+        action: WebStepAction
+        selector: string
+        value: string
+        seconds: number
+        optional: boolean
+        secret: boolean
+    }
+
+    interface WebPage {
+        id: number
+        channel_id: number
+        name: string
+        url: string
+        steps: WebStep[]
+        audio: boolean
+        zoom: number
+        preroll: number
+    }
+
+    interface WebPageTest {
+        success: boolean
+        error: string | null
+        failed_step: number | null
+        screenshot: string | null
+    }
+
     interface FileObject {
         name: string
         duration: number

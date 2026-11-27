@@ -35,6 +35,7 @@ use crate::{
         },
         output::{logo_config, player},
         utils::Media,
+        web::WebSources,
     },
     utils::{
         config::PlayoutConfig, errors::ServiceError, logging::Target, system::SystemStat,
@@ -163,6 +164,7 @@ pub struct ChannelManager {
     pub(crate) manual_state: Arc<ManualState>,
     pub(crate) manual_jobs: Arc<tokio::sync::Semaphore>,
     pub playback_control: Arc<Mutex<PlaybackControl>>,
+    pub(crate) web: WebSources,
     pub shutdown: CancellationToken,
     pub system: SystemStat,
 }
@@ -283,6 +285,7 @@ impl ChannelManager {
             manual_state: Arc::new(ManualState::default()),
             manual_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
             playback_control: Arc::new(Mutex::new(PlaybackControl::default())),
+            web: WebSources::default(),
             shutdown,
             system,
         })

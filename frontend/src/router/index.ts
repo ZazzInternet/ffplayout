@@ -117,6 +117,12 @@ const router = createRouter({
                     meta: { showHeader: true, roles: ['global_admin', 'channel_admin'] },
                 },
                 {
+                    path: 'web',
+                    name: 'configure-web',
+                    component: () => import('@/components/config/ConfigWeb.vue'),
+                    meta: { showHeader: true, roles: ['global_admin', 'channel_admin'] },
+                },
+                {
                     path: 'outputs',
                     name: 'configure-outputs',
                     component: () => import('@/components/config/ConfigOutputs.vue'),

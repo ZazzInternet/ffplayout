@@ -11,9 +11,10 @@ use ff_engine::{
 };
 use log::*;
 use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::{
+    db::{handles, models::web_page_id},
     file::norm_abs_path,
     player::{
         controller::{ChannelManager, ProcessingGuard, loudness_config},
@@ -21,6 +22,7 @@ use crate::{
         input::source_generator,
         process_diagnostics::ProcessDiagnostics,
         utils::{Media, sec_to_time},
+        web::{self, WebSessionState},
     },
     utils::{
         config::{ENGINE_AUDIO_SAMPLE_RATE, EncodingSource, OutputMode, PlayoutConfig},
@@ -33,6 +35,8 @@ use crate::{
 /// the pipeline time out after at most ten seconds on their own.
 const PROGRAM_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const PROGRAM_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// Length of the black clips that bridge the time until a web page is loaded.
+const WEB_LOADING_STEP: f64 = 1.0;
 
 pub(crate) fn logo_config(config: &PlayoutConfig) -> Option<LogoConfig> {
     config.processing.add_logo.then(|| LogoConfig {
@@ -338,6 +342,10 @@ async fn play_loop(
         .process_diagnostics
         .then(|| ProcessDiagnostics::new(manager.id, playout.playback_control()));
     let mut node_sources = source_generator(manager.clone()).await;
+    // Browser sessions belong to this play loop; they end with it, also on
+    // an error return, and a pending preroll is cancelled.
+    let _web_sessions = WebSessionsGuard(manager.web.clone());
+    let mut _web_preroll: Option<DropGuard> = None;
     manager.graphics.resume();
     manual::begin_restore(&manager).await;
 
@@ -400,30 +408,53 @@ async fn play_loop(
 
         let duration = playout_duration(&node);
         let is_ad = node.ad;
-        match playout
-            .play_clip(
-                node.source.clone(),
-                ClipPlaybackOptions {
-                    seek_seconds: (node.seek > 0.0).then_some(node.seek),
-                    duration_seconds: duration,
-                    external_audio_path: (!node.audio.is_empty()).then(|| node.audio.clone()),
-                    subtitles_media_path: subtitle_media_path(config, &node.source),
-                    logo_fade: LogoFade {
-                        fade_in: !is_ad && node.last_ad,
-                        fade_out: !is_ad && node.next_ad,
-                    },
-                    playout_rate: 1.0,
-                    graphics: manager.graphics.for_clip(
-                        &node,
-                        &config.storage.path,
-                        graphics_canvas,
-                        id,
-                    ),
-                },
-            )
-            .await
-            .map_err(engine_error)?
-        {
+        let options = ClipPlaybackOptions {
+            seek_seconds: (node.seek > 0.0).then_some(node.seek),
+            duration_seconds: duration,
+            external_audio_path: (!node.audio.is_empty()).then(|| node.audio.clone()),
+            subtitles_media_path: subtitle_media_path(config, &node.source),
+            logo_fade: LogoFade {
+                fade_in: !is_ad && node.last_ad,
+                fade_out: !is_ad && node.next_ad,
+            },
+            playout_rate: 1.0,
+            graphics: manager
+                .graphics
+                .for_clip(&node, &config.storage.path, graphics_canvas, id),
+        };
+        let web_geometry = web_geometry(config);
+        let current_page = web_page_id(&node.source);
+        let upcoming_page = upcoming_web_page(&manager, config).await;
+
+        // Close the browser of every page that is not on air. The upcoming
+        // page is loaded by the preroll below; a session it still has is a
+        // leftover of its previous slot and would otherwise stay open, and
+        // unrefreshed, through the whole clip in between.
+        manager
+            .web
+            .retain(&current_page.into_iter().collect::<Vec<_>>());
+        _web_preroll = upcoming_page
+            .filter(|page| Some(*page) != current_page)
+            .map(|page_id| {
+                preroll_web_page(
+                    manager.clone(),
+                    page_id,
+                    web_geometry,
+                    duration.unwrap_or(0.0),
+                )
+            });
+
+        let result = match current_page {
+            Some(page_id) => {
+                play_web_page(&manager, playout, page_id, web_geometry, options).await?
+            }
+            None => playout
+                .play_clip(node.source.clone(), options)
+                .await
+                .map_err(engine_error)?,
+        };
+
+        match result {
             ClipResult::LiveEnded => {
                 info!(channel = id;
                     "Live input ended; reinitialize playlist at current time"
@@ -468,6 +499,143 @@ async fn play_loop(
     }
 
     Ok(())
+}
+
+/// Stops all browser sessions of a channel when its play loop ends.
+struct WebSessionsGuard(web::WebSources);
+
+impl Drop for WebSessionsGuard {
+    fn drop(&mut self) {
+        self.0.stop_all();
+    }
+}
+
+/// Web pages render at the size and frame rate of the program.
+pub(crate) fn web_geometry(config: &PlayoutConfig) -> web::Geometry {
+    let output = config.output.for_playout();
+    let (width, height, fps) = config
+        .program
+        .as_ref()
+        .map_or((output.width, output.height, output.fps), |program| {
+            (program.width, program.height, program.fps)
+        });
+
+    web::Geometry {
+        // The capture encodes 4:2:0 video, which needs even dimensions.
+        width: (width & !1).max(2),
+        height: (height & !1).max(2),
+        fps: (fps.round() as u32).clamp(1, 60),
+    }
+}
+
+/// The web page of the playlist entry after the one that is about to play.
+async fn upcoming_web_page(manager: &ChannelManager, config: &PlayoutConfig) -> Option<i32> {
+    let index = manager.current_index.load(Ordering::SeqCst);
+    let list = manager.current_list.lock().await;
+    let next = upcoming_index(index, list.len(), config.playlist.infinit)?;
+
+    web_page_id(&list[next].source)
+}
+
+/// Position of the entry that follows, given the index the playlist reader
+/// continues with. An infinite playlist starts over with its first entry;
+/// what follows the last entry of a day is only known once that day is read.
+fn upcoming_index(next_index: usize, length: usize, infinit: bool) -> Option<usize> {
+    if next_index < length {
+        Some(next_index)
+    } else {
+        (infinit && length > 0).then_some(0)
+    }
+}
+
+/// Loads the upcoming web page in time for the end of the current clip, so
+/// that logging in and navigating are finished when its slot begins. The
+/// returned guard cancels a preroll that has not started yet.
+fn preroll_web_page(
+    manager: ChannelManager,
+    page_id: i32,
+    geometry: web::Geometry,
+    current_duration: f64,
+) -> DropGuard {
+    let token = CancellationToken::new();
+    let cancelled = token.clone();
+
+    tokio::spawn(async move {
+        let preroll = match handles::select_web_page(&manager.db_pool, manager.id, page_id).await {
+            Ok(Some(page)) => f64::from(page.preroll),
+            // A missing page is reported when its slot begins.
+            _ => return,
+        };
+        let wait = Duration::from_secs_f64((current_duration - preroll).max(0.0));
+
+        tokio::select! {
+            () = cancelled.cancelled() => {}
+            () = sleep(wait) => {
+                manager.web.start(&manager.db_pool, manager.id, page_id, geometry);
+            }
+        }
+    });
+
+    token.drop_guard()
+}
+
+/// Plays a web page for the slot described by `options`.
+///
+/// While the page is still loading, the program shows black instead of a
+/// login form or a half-loaded page. A page that fails stays black for its
+/// slot, which keeps the schedule in time.
+async fn play_web_page(
+    manager: &ChannelManager,
+    playout: &AsyncPlayout,
+    page_id: i32,
+    geometry: web::Geometry,
+    mut options: ClipPlaybackOptions,
+) -> Result<ClipResult, ServiceError> {
+    let mut state = manager
+        .web
+        .start(&manager.db_pool, manager.id, page_id, geometry);
+    let mut remaining = options.duration_seconds.unwrap_or(0.0);
+
+    options.seek_seconds = None;
+    options.external_audio_path = None;
+    options.subtitles_media_path = None;
+
+    loop {
+        let current = state.borrow_and_update().clone();
+        let source = match current {
+            WebSessionState::Ready(url) => Some(url),
+            WebSessionState::Failed(_) => Some(String::new()),
+            WebSessionState::Loading => None,
+        };
+
+        if let Some(source) = source {
+            options.duration_seconds = Some(remaining);
+
+            return playout
+                .play_clip(source, options)
+                .await
+                .map_err(engine_error);
+        }
+
+        if remaining <= WEB_LOADING_STEP {
+            return Ok(ClipResult::Played);
+        }
+
+        // An empty source lets the engine generate black and silence.
+        let waiting = ClipPlaybackOptions {
+            duration_seconds: Some(WEB_LOADING_STEP),
+            ..ClipPlaybackOptions::default()
+        };
+
+        match playout
+            .play_clip(String::new(), waiting)
+            .await
+            .map_err(engine_error)?
+        {
+            ClipResult::Played | ClipResult::Fallback { .. } => remaining -= WEB_LOADING_STEP,
+            interrupted => return Ok(interrupted),
+        }
+    }
 }
 
 async fn open_playout(
@@ -837,10 +1005,18 @@ fn request_shutdown(shutdown: &CancellationToken) {
 
 #[cfg(test)]
 mod tests {
-    use super::{playout_duration, recording_config, request_shutdown};
+    use super::{playout_duration, recording_config, request_shutdown, upcoming_index};
     use crate::player::utils::Media;
     use crate::utils::config::{EncodingSource, OutputMode, PlayoutConfig};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn upcoming_entry_wraps_only_in_an_infinite_playlist() {
+        assert_eq!(upcoming_index(1, 2, false), Some(1));
+        assert_eq!(upcoming_index(2, 2, false), None);
+        assert_eq!(upcoming_index(2, 2, true), Some(0));
+        assert_eq!(upcoming_index(0, 0, true), None);
+    }
 
     fn recording_test_config(mode: OutputMode, source: EncodingSource) -> PlayoutConfig {
         let mut config = PlayoutConfig::default();

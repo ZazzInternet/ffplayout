@@ -3,7 +3,7 @@ use std::sync::PoisonError;
 mod instances;
 mod playout;
 
-pub(crate) use playout::logo_config;
+pub(crate) use playout::{logo_config, web_geometry};
 
 use crate::{player::controller::ChannelManager, utils::errors::ServiceError};
 
