@@ -16,11 +16,11 @@ use crate::{
         utils::{
             JsonPlaylist, Media, get_date, get_delta, is_close, is_image_source, is_live_source,
             is_remote,
-            json_serializer::{read_json, set_defaults},
+            json_serializer::{daily_playlist_path, read_json, set_defaults},
             modified_time, probe_media, time_in_seconds, utc_offset_change,
         },
     },
-    utils::{config::PlayoutConfig, time_machine::time_now},
+    utils::{config::PlayoutConfig, playlist::latest_playlist_date, time_machine::time_now},
 };
 
 const NEXT_START_THRESHOLD: f64 = 1.5;
@@ -136,11 +136,46 @@ impl CurrentProgram {
         }
     }
 
+    /// Point an infinite playout at the most recent stored playlist.
+    ///
+    /// An infinite playlist outlives the broadcast day it was saved on, so no
+    /// file exists for the following days. Without this, a playout started on
+    /// a later day finds no playlist and plays the placeholder, and a running
+    /// one never notices a playlist saved under a newer date.
+    async fn follow_latest_playlist(&mut self) {
+        let root = &self.config.channel.playlists;
+
+        if !self.config.playlist.infinit || !root.is_dir() {
+            return;
+        }
+
+        let today = get_date(true, self.start_sec, false, &self.config.channel.timezone);
+        let Some(date) = latest_playlist_date(root, &today).await else {
+            return;
+        };
+        let path = daily_playlist_path(root, &date).display().to_string();
+
+        if self.json_playlist.path.as_deref() == Some(path.as_str()) {
+            return;
+        }
+
+        if self.json_playlist.path.is_some() {
+            info!(channel = self.channel_id; "Switch to playlist <span class=\"log-addr\">{path}</span>");
+            self.manager.list_init.store(true, Ordering::SeqCst);
+        }
+
+        // Without a path the playlist is read again from the file of `date`.
+        self.date = date;
+        self.json_playlist.path = None;
+    }
+
     // Check if there is no current playlist or file got updated,
     // and when is so load/reload it.
     async fn load_or_update_playlist(&mut self) {
         let mut get_current = false;
         let mut reload = false;
+
+        self.follow_latest_playlist().await;
 
         if let Some(path) = self.json_playlist.path.clone() {
             if (Path::new(&path).is_file() || is_remote(&path))
@@ -950,6 +985,113 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn infinite_playlist_survives_day_month_and_year_changes() {
+        use std::sync::atomic::Ordering;
+
+        use super::CurrentProgram;
+        use crate::{
+            player::utils::json_serializer::daily_playlist_path, test_support::channel_manager,
+            utils::time_machine::with_mock_time,
+        };
+
+        fn store_playlist(root: &std::path::Path, date: &str) -> String {
+            let path = daily_playlist_path(root, date);
+            let contents = format!(
+                r#"{{"date":"{date}","program":[{{"source":"{date}.mp4","in":0.0,"out":30.0,"duration":30.0}}]}}"#
+            );
+
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, contents).unwrap();
+
+            path.display().to_string()
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (manager, _pool) = runtime.block_on(channel_manager());
+        let (root, storage) = runtime.block_on(async {
+            let mut config = manager.config.write().await;
+
+            config.channel.timezone = Some(jiff::tz::TimeZone::UTC);
+            config.general.skip_validation = true;
+            config.playlist.start_sec = Some(21_565.0);
+            config.playlist.length_sec = Some(86_400.0);
+            config.playlist.infinit = true;
+
+            (
+                config.channel.playlists.clone(),
+                config.channel.storage.clone(),
+            )
+        });
+        let november = store_playlist(&root, "2026-11-30");
+        let loaded_source =
+            |program: &CurrentProgram| program.json_playlist.program[0].source.clone();
+
+        // A playout (re)started on a later day has no file of its own day.
+        // The second time is still the broadcast day before the day start.
+        for now in [
+            "2026-12-01T12:00:00+00:00",
+            "2027-01-01T05:00:00+00:00",
+            "2027-02-10T12:00:00+00:00",
+        ] {
+            with_mock_time(now, || {
+                runtime.block_on(async {
+                    let mut program = CurrentProgram::new(manager.clone()).await;
+
+                    program.load_or_update_playlist().await;
+
+                    assert_eq!(
+                        program.json_playlist.path.as_ref(),
+                        Some(&november),
+                        "{now}"
+                    );
+                    assert!(loaded_source(&program).ends_with("2026-11-30.mp4"));
+                    assert_eq!(*manager.current_date.lock().await, "2026-11-30");
+                });
+            });
+        }
+
+        // A running playout keeps its file over the day change and moves on
+        // once a playlist is saved under a newer date.
+        let before_day_start = "2027-01-01T05:59:00+00:00";
+        let mut program = with_mock_time(before_day_start, || {
+            runtime.block_on(async {
+                let mut program = CurrentProgram::new(manager.clone()).await;
+
+                program.load_or_update_playlist().await;
+                manager.list_init.store(false, Ordering::SeqCst);
+
+                program
+            })
+        });
+        let january = store_playlist(&root, "2027-01-01");
+
+        with_mock_time(before_day_start, || {
+            runtime.block_on(async {
+                program.load_or_update_playlist().await;
+
+                // The new file belongs to the broadcast day that has not begun.
+                assert_eq!(program.json_playlist.path.as_ref(), Some(&november));
+                assert!(!manager.list_init.load(Ordering::SeqCst));
+            });
+        });
+        with_mock_time("2027-01-01T06:00:00+00:00", || {
+            runtime.block_on(async {
+                program.load_or_update_playlist().await;
+
+                assert_eq!(program.json_playlist.path.as_ref(), Some(&january));
+                assert!(loaded_source(&program).ends_with("2027-01-01.mp4"));
+                assert!(manager.list_init.load(Ordering::SeqCst));
+                assert_eq!(*manager.current_date.lock().await, "2027-01-01");
+            });
+        });
+
+        std::fs::remove_dir_all(storage).unwrap();
     }
 
     #[test]

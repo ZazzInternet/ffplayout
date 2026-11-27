@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -73,6 +73,16 @@ fn default_channel() -> String {
     "Channel 1".to_string()
 }
 
+/// Location of the playlist for `date` (`YYYY-MM-DD`) below a playlist root:
+/// `<root>/<year>/<month>/<date>.json`.
+pub fn daily_playlist_path(root: &Path, date: &str) -> PathBuf {
+    let mut parts = date.split('-');
+    let year = parts.next().unwrap_or_default();
+    let month = parts.next().unwrap_or_default();
+
+    root.join(year).join(month).join(format!("{date}.json"))
+}
+
 pub fn set_defaults(config: &PlayoutConfig, playlist: &mut JsonPlaylist) {
     let mut start_sec = playlist.start_sec.unwrap();
     let mut length = 0.0;
@@ -121,12 +131,7 @@ pub async fn read_json(
         playlist_path.is_dir() || is_remote(&config.channel.playlists.to_string_lossy());
 
     if uses_daily_playlists {
-        let d: Vec<&str> = date.split('-').collect();
-        playlist_path = playlist_path
-            .join(d[0])
-            .join(d[1])
-            .join(date.clone())
-            .with_extension("json");
+        playlist_path = daily_playlist_path(&playlist_path, &date);
     }
 
     let mut current_file = playlist_path.as_path().display().to_string();

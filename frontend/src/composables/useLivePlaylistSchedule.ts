@@ -17,6 +17,9 @@ export function useLivePlaylistSchedule(
     const serverOffset = ref(0)
     const program = shallowRef<ScheduledClip[]>([])
     const loadedDate = ref('')
+    // An infinite playlist is served from the file of an earlier day; rows in
+    // the editor are identified by that file's date.
+    const storedDate = ref('')
     const schedule = computed(() => {
         const config = options()
         return broadcastPosition(tick.value + serverOffset.value, config.timezone, config.start, config.shift)
@@ -26,7 +29,7 @@ export function useLivePlaylistSchedule(
         if (!config.active || loadedDate.value !== schedule.value.date) return undefined
         if (!config.channel) return undefined
         const position = scheduledClipAt(program.value, schedule.value.elapsed, config.length, config.infinite)
-        return position ? { ...position, channel: config.channel, date: loadedDate.value } : undefined
+        return position ? { ...position, channel: config.channel, date: storedDate.value } : undefined
     })
     let request: AbortController | undefined
     let lastFetch = 0
@@ -43,12 +46,13 @@ export function useLivePlaylistSchedule(
                 cache: 'no-store',
             })
             if (!response.ok) throw new Error('Playlist unavailable')
-            const data = (await response.json()) as { program?: ScheduledClip[] }
+            const data = (await response.json()) as { date?: string; program?: ScheduledClip[] }
             if (controller.signal.aborted) return
             const serverDate = Date.parse(response.headers.get('Date') ?? '')
             if (Number.isFinite(serverDate)) serverOffset.value = serverDate - Date.now()
             program.value = data.program ?? []
             loadedDate.value = date
+            storedDate.value = (config.infinite && data.date) || date
         } catch {
             if (!controller.signal.aborted) {
                 program.value = []

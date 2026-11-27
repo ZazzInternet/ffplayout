@@ -8,7 +8,7 @@ import timezone from 'dayjs/plugin/timezone.js'
 import { defineStore } from 'pinia'
 
 import { authFetch } from '@/composables/authFetch'
-import type { ScheduledPlaylistPosition } from '@/composables/livePlaylistSchedule'
+import { broadcastPosition, type ScheduledPlaylistPosition } from '@/composables/livePlaylistSchedule'
 import { i18n } from '@/i18n'
 import { playlistOperations } from '@/composables/helper'
 import { useAuth } from '@/stores/auth'
@@ -75,6 +75,14 @@ export const usePlaylist = defineStore('playlist', {
             const configStore = useConfig()
             const indexStore = useIndex()
             const channel = configStore.channels[configStore.i]?.id
+            const infinite = configStore.playout.playlist.infinit
+
+            // An infinite playlist stays in the file of the day it was saved on.
+            // Asking for the current broadcast day makes the server answer with
+            // the playlist the playout runs, whatever date that file carries.
+            if (infinite) {
+                date = broadcastPosition(Date.now(), configStore.timezone, configStore.playout.playlist.startInSec).date
+            }
 
             await authFetch<Playlist>(`/api/playlist/${channel}?date=${date}`, {
                 method: 'GET',
@@ -82,6 +90,12 @@ export const usePlaylist = defineStore('playlist', {
             })
                 .then((data: Playlist) => {
                     if (data.program) {
+                        // Edit and save under the date of the file that was read.
+                        if (infinite && data.date) {
+                            date = data.date
+                            this.listDate = date
+                        }
+
                         const programData = processPlaylist(date, data.program, false)
 
                         if (

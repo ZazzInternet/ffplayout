@@ -53,6 +53,9 @@ const activeRowIndex = computed(() => {
             playlistStore.playlist,
         )
     }
+    // An infinite playlist is always the running one, whatever its file date.
+    if (configStore.playoutSaved.playlist.infinit) return currentIndex.value
+
     return listDate.value === todayDate.value ? currentIndex.value : -1
 })
 
