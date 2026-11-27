@@ -96,11 +96,9 @@ fn find_program(name: &str) -> Option<PathBuf> {
 struct SessionDir(PathBuf);
 
 impl SessionDir {
-    fn create(channel_id: i32, page_id: i32) -> Result<Self> {
-        let path = env::temp_dir().join(format!(
-            "ffplayout-web-{channel_id}-{page_id}-{}",
-            Uuid::new_v4().simple()
-        ));
+    fn create() -> Result<Self> {
+        // The name carries no request data, only a random identifier.
+        let path = env::temp_dir().join(format!("ffplayout-web-{}", Uuid::new_v4().simple()));
 
         // The directory holds the X authority cookie, the audio socket and
         // the browser profile with any session the page logged in to.
@@ -144,7 +142,7 @@ impl Browser {
         with_audio: bool,
     ) -> Result<Self> {
         let started = Instant::now();
-        let dir = SessionDir::create(page.channel_id, page.id)?;
+        let dir = SessionDir::create()?;
         let display = Display::start(tools, &dir, geometry).await?;
         let audio = match (&tools.pulseaudio, with_audio && page.audio) {
             (Some(pulseaudio), true) => match AudioServer::start(pulseaudio, &dir).await {

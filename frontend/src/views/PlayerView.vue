@@ -45,6 +45,7 @@ import { authFetch } from '@/composables/authFetch'
 import { browseChannelPaths } from '@/composables/fileBrowser'
 import { stringFormatter, playlistOperations } from '@/composables/helper'
 import { createFilePreviewUrl, storagePreviewPath } from '@/composables/fileAccess'
+import { randomId } from '@/composables/randomId'
 import { isWebSource, webPlaylistItem } from '@/composables/webPages'
 import { useAuth } from '@/stores/auth'
 import { useIndex } from '@/stores/index'
@@ -275,7 +276,7 @@ function addWebPage(add: boolean) {
 
     if (!add || !page || webDuration.value <= 0) return
 
-    playlistStore.playlist.push(webPlaylistItem(page, webDuration.value, genUID()))
+    playlistStore.playlist.push(webPlaylistItem(page, webDuration.value, randomId()))
     processPlaylist(listDate.value, playlistStore.playlist, false)
 }
 
