@@ -13,6 +13,7 @@ pub mod refresh_token;
 pub mod setup;
 pub mod source;
 pub mod user;
+pub mod web_page;
 
 pub use channel::*;
 pub use configuration::*;
@@ -26,3 +27,4 @@ pub use refresh_token::*;
 pub use setup::*;
 pub use source::*;
 pub use user::*;
+pub use web_page::*;

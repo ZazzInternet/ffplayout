@@ -71,6 +71,14 @@ const channelQuery = computed(() => ({ channel: route.query.channel }))
                 >{{ t('config.outputs') }}</RouterLink
             >
             <RouterLink
+                v-if="authStore.role !== 'user'"
+                :to="{ name: 'configure-web', query: channelQuery }"
+                class="join-item btn btn-sm btn-primary mt-1 duration-500"
+                :class="route.name === 'configure-web' && 'bg-base-100/40'"
+            >
+                {{ t('web.title') }}
+            </RouterLink>
+            <RouterLink
                 :to="{ name: 'configure-user', query: channelQuery }"
                 class="join-item btn btn-sm btn-primary mt-1 duration-500"
                 :class="isUserRoute && 'bg-base-100/40'"

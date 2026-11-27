@@ -75,7 +75,7 @@ lexical-sort = "0.3"
 local-ip-address = "0.6"
 log = { version = "0.4", features = ["std", "kv"] }
 mime_guess = "2"
-nix = { version = "0.32", features = ["user", "fs"] }
+nix = { version = "0.32", features = ["user", "fs", "signal"] }
 notify = "9"
 notify-debouncer-full = { version = "0.8", default-features = false }
 path-clean = "1.0"

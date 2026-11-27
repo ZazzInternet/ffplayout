@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection};
 
 use crate::{
-    db::models::ConfigDump,
+    db::models::{ConfigDump, WebStep},
     utils::{config::ProgramFormat, errors::ProcessError},
 };
 
@@ -241,6 +241,10 @@ fn validate_structured_settings(dump: &ConfigDump) -> Result<(), ProcessError> {
         for row in &dump.tables[table] {
             parse_field::<BTreeMap<String, Value>>(table, column, row[column].as_str().unwrap())?;
         }
+    }
+
+    for row in &dump.tables["config_web_pages"] {
+        parse_field::<Vec<WebStep>>("config_web_pages", "steps", row["steps"].as_str().unwrap())?;
     }
 
     Ok(())

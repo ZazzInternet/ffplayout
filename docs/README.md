@@ -33,6 +33,10 @@ Generate playlists based on template.
 
 Use of remote sources, like https://example.org/video.mp4
 
+### **[Web Pages](/docs/web_pages.md)**
+
+Show web pages in a playlist, including login and navigation steps.
+
 ### **[External Tasks](/docs/external_tasks.md)**
 
 Run a script or binary when a clip starts.

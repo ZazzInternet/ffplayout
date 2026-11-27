@@ -28,6 +28,8 @@ mod hardening;
 mod playlist;
 #[path = "api/users.rs"]
 mod users;
+#[path = "api/web.rs"]
+mod web;
 
 use ffplayout::{
     api::{

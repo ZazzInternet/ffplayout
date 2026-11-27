@@ -95,7 +95,13 @@ pub fn routes() -> Router<AppState> {
                     get(get_by_name).put(update_user).delete(remove_user),
                 )
                 .route("/user", post(add_user))
-                .route("/users", get(get_users)),
+                .route("/users", get(get_users))
+                .route("/web/{id}", get(get_web_pages).post(add_web_page))
+                .route("/web/{id}/test", post(test_web_page))
+                .route(
+                    "/web/{channel}/{id}",
+                    put(update_web_page).delete(delete_web_page),
+                ),
         )
         .nest("/data", sse::routes::data_routes())
         .route("/file/{id}/{*filename}", get(get_file))
