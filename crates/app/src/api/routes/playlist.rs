@@ -15,7 +15,8 @@ use crate::{
     utils::{
         errors::ServiceError,
         playlist::{
-            delete_playlist, generate_playlist, playlist_path, read_playlist, write_playlist,
+            delete_playlist, generate_playlist, playlist_path, read_editable_playlist,
+            write_playlist,
         },
     },
 };
@@ -49,7 +50,7 @@ pub async fn get_playlist(
 
     let config = manager.config.read().await.clone();
 
-    match read_playlist(&config, obj.date).await {
+    match read_editable_playlist(&config, obj.date).await {
         Ok(playlist) => Ok(Json(playlist)),
         Err(e) => Err(e),
     }
